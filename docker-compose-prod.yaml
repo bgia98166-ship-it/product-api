@@ -1,0 +1,42 @@
+name: product-api
+
+services:
+  mongodb:
+    image: "${MONGO_IMAGE:?Thieu MONGO_IMAGE trong .env}"
+    pull_policy: never
+    container_name: nammongodb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "if (db.adminCommand({ ping: 1 }).ok !== 1) quit(1)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  product-api:
+    image: "${DOCKERHUB_USERNAME:?Thieu DOCKERHUB_USERNAME trong .env}/product-api:${IMAGE_TAG:-latest}"
+    container_name: product-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      MONGO_URI: mongodb://mongodb:27017/productdb
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
+    external: true
+    name: "${MONGO_DATA_VOLUME:?Thieu MONGO_DATA_VOLUME trong .env}"
