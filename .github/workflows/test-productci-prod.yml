@@ -75,3 +75,73 @@ jobs:
           docker tag product-api:local "$IMAGE:latest"
           docker push "$IMAGE:$GITHUB_SHA"
           docker push "$IMAGE:latest"
+            deploy-local:
+    needs: ci-crud
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, product-local]
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: powershell
+
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      IMAGE_TAG: ${{ github.sha }}
+      MONGO_IMAGE: ${{ vars.LOCAL_MONGO_IMAGE }}
+      MONGO_DATA_VOLUME: ${{ vars.LOCAL_MONGO_DATA_VOLUME }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check local Docker and MongoDB data
+        run: |
+          docker info
+          if ($LASTEXITCODE -ne 0) { throw "Docker Engine is unavailable" }
+
+          if (-not $env:MONGO_IMAGE -or -not $env:MONGO_DATA_VOLUME) {
+            throw "Missing local MongoDB configuration"
+          }
+
+          docker image inspect "$env:MONGO_IMAGE"
+          if ($LASTEXITCODE -ne 0) { throw "Local MongoDB image is missing" }
+
+          docker volume inspect "$env:MONGO_DATA_VOLUME"
+          if ($LASTEXITCODE -ne 0) { throw "MongoDB data volume is missing" }
+
+          docker compose -p product-api -f docker-compose-prod.yaml config --quiet
+          if ($LASTEXITCODE -ne 0) { throw "Invalid Compose configuration" }
+
+      - name: Pull tested API image
+        run: |
+          docker compose -p product-api -f docker-compose-prod.yaml pull product-api
+          if ($LASTEXITCODE -ne 0) { throw "Failed to pull API image" }
+
+      - name: Deploy and wait for healthy services
+        run: |
+          docker compose -p product-api -f docker-compose-prod.yaml up -d --wait --wait-timeout 180
+          if ($LASTEXITCODE -ne 0) { throw "Deployment or healthcheck failed" }
+
+      - name: Verify deployed version and API health
+        run: |
+          $expected = "$($env:DOCKERHUB_USERNAME)/product-api:$($env:IMAGE_TAG)"
+          $actual = docker inspect --format='{{.Config.Image}}' product-api
+          if ($LASTEXITCODE -ne 0) { throw "Cannot inspect API container" }
+          if ($actual.Trim() -ne $expected) { throw "Deployed image does not match commit" }
+
+          $health = Invoke-RestMethod -Uri http://127.0.0.1:3000/health -TimeoutSec 10
+          if ($health.status -ne "ok" -or $health.database -ne "connected") {
+            throw "API or database is not healthy"
+          }
+
+          Write-Output "Deployed successfully: $actual"
+          $health | ConvertTo-Json
+          docker compose -p product-api -f docker-compose-prod.yaml ps
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read service status" }
+
+      - name: Show logs on deployment failure
+        if: failure()
+        run: docker compose -p product-api -f docker-compose-prod.yaml logs --tail 100
